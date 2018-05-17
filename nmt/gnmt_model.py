@@ -42,7 +42,7 @@ class GNMTModel(attention_model.AttentionModel):
                target_vocab_table,
                reverse_target_vocab_table=None,
                scope=None,
-               single_cell_fn=None):
+               extra_args=None):
     super(GNMTModel, self).__init__(
         hparams=hparams,
         mode=mode,
@@ -51,7 +51,7 @@ class GNMTModel(attention_model.AttentionModel):
         target_vocab_table=target_vocab_table,
         reverse_target_vocab_table=reverse_target_vocab_table,
         scope=scope,
-        single_cell_fn=single_cell_fn)
+        extra_args=extra_args)
 
   def _build_encoder(self, hparams):
     """Build a GNMT encoder."""
@@ -62,10 +62,8 @@ class GNMTModel(attention_model.AttentionModel):
       raise ValueError("Unknown encoder_type %s" % hparams.encoder_type)
 
     # Build GNMT encoder.
-    num_layers = hparams.num_layers
-    num_residual_layers = hparams.num_residual_layers
     num_bi_layers = 1
-    num_uni_layers = num_layers - num_bi_layers
+    num_uni_layers = self.num_encoder_layers - num_bi_layers
     utils.print_out("  num_bi_layers = %d" % num_bi_layers)
     utils.print_out("  num_uni_layers = %d" % num_uni_layers)
 
@@ -96,10 +94,10 @@ class GNMTModel(attention_model.AttentionModel):
           unit_type=hparams.unit_type,
           num_units=hparams.num_units,
           num_layers=num_uni_layers,
-          num_residual_layers=num_residual_layers,
+          num_residual_layers=self.num_encoder_residual_layers,
           forget_bias=hparams.forget_bias,
           dropout=hparams.dropout,
-          num_gpus=hparams.num_gpus,
+          num_gpus=self.num_gpus,
           base_gpu=1,
           mode=self.mode,
           single_cell_fn=self.single_cell_fn)
@@ -123,11 +121,15 @@ class GNMTModel(attention_model.AttentionModel):
   def _build_decoder_cell(self, hparams, encoder_outputs, encoder_state,
                           source_sequence_length):
     """Build a RNN cell with GNMT attention architecture."""
+    # Standard attention
+    if hparams.attention_architecture == "standard":
+      return super(GNMTModel, self)._build_decoder_cell(
+          hparams, encoder_outputs, encoder_state, source_sequence_length)
+
+    # GNMT attention
     attention_option = hparams.attention
     attention_architecture = hparams.attention_architecture
     num_units = hparams.num_units
-    num_layers = hparams.num_layers
-    num_residual_layers = hparams.num_residual_layers
     beam_width = hparams.beam_width
 
     dtype = tf.float32
@@ -148,19 +150,21 @@ class GNMTModel(attention_model.AttentionModel):
     else:
       batch_size = self.batch_size
 
-    attention_mechanism = attention_model.create_attention_mechanism(
-        attention_option, num_units, memory, source_sequence_length)
+    attention_mechanism = self.attention_mechanism_fn(
+        attention_option, num_units, memory, source_sequence_length, self.mode)
 
     cell_list = model_helper._cell_list(  # pylint: disable=protected-access
         unit_type=hparams.unit_type,
         num_units=num_units,
-        num_layers=num_layers,
-        num_residual_layers=num_residual_layers,
+        num_layers=self.num_decoder_layers,
+        num_residual_layers=self.num_decoder_residual_layers,
         forget_bias=hparams.forget_bias,
         dropout=hparams.dropout,
-        num_gpus=hparams.num_gpus,
+        num_gpus=self.num_gpus,
         mode=self.mode,
-        single_cell_fn=self.single_cell_fn)
+        single_cell_fn=self.single_cell_fn,
+        residual_fn=gnmt_residual_fn
+    )
 
     # Only wrap the bottom layer with the attention mechanism.
     attention_cell = cell_list.pop(0)
@@ -171,7 +175,7 @@ class GNMTModel(attention_model.AttentionModel):
     attention_cell = tf.contrib.seq2seq.AttentionWrapper(
         attention_cell,
         attention_mechanism,
-        attention_layer_size=None,  # don't use attenton layer.
+        attention_layer_size=None,  # don't use attention layer.
         output_attention=False,
         alignment_history=alignment_history,
         name="attention")
@@ -186,7 +190,6 @@ class GNMTModel(attention_model.AttentionModel):
       raise ValueError(
           "Unknown attention_architecture %s" % attention_architecture)
 
-
     if hparams.pass_hidden_state:
       decoder_initial_state = tuple(
           zs.clone(cell_state=es)
@@ -199,6 +202,11 @@ class GNMTModel(attention_model.AttentionModel):
     return cell, decoder_initial_state
 
   def _get_infer_summary(self, hparams):
+    # Standard attention
+    if hparams.attention_architecture == "standard":
+      return super(GNMTModel, self)._get_infer_summary(hparams)
+
+    # GNMT attention
     if hparams.beam_width > 0:
       return tf.no_op()
     return attention_model._create_attention_images_summary(
@@ -243,17 +251,35 @@ class GNMTAttentionMultiCell(tf.nn.rnn_cell.MultiRNNCell):
           cell = self._cells[i]
           cur_state = state[i]
 
-          if not isinstance(cur_state, tf.contrib.rnn.LSTMStateTuple):
-            raise TypeError("`state[{}]` must be a LSTMStateTuple".format(i))
-
           if self.use_new_attention:
-            cur_state = cur_state._replace(h=tf.concat(
-                [cur_state.h, new_attention_state.attention], 1))
+            cur_inp = tf.concat([cur_inp, new_attention_state.attention], -1)
           else:
-            cur_state = cur_state._replace(h=tf.concat(
-                [cur_state.h, attention_state.attention], 1))
+            cur_inp = tf.concat([cur_inp, attention_state.attention], -1)
 
           cur_inp, new_state = cell(cur_inp, cur_state)
           new_states.append(new_state)
 
     return cur_inp, tuple(new_states)
+
+
+def gnmt_residual_fn(inputs, outputs):
+  """Residual function that handles different inputs and outputs inner dims.
+
+  Args:
+    inputs: cell inputs, this is actual inputs concatenated with the attention
+      vector.
+    outputs: cell outputs
+
+  Returns:
+    outputs + actual inputs
+  """
+  def split_input(inp, out):
+    out_dim = out.get_shape().as_list()[-1]
+    inp_dim = inp.get_shape().as_list()[-1]
+    return tf.split(inp, [out_dim, inp_dim - out_dim], axis=-1)
+  actual_inputs, _ = nest.map_structure(split_input, inputs, outputs)
+  def assert_shape_match(inp, out):
+    inp.get_shape().assert_is_compatible_with(out.get_shape())
+  nest.assert_same_structure(actual_inputs, outputs)
+  nest.map_structure(assert_shape_match, actual_inputs, outputs)
+  return nest.map_structure(lambda inp, out: inp + out, actual_inputs, outputs)

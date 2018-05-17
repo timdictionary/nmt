@@ -44,10 +44,15 @@ def add_arguments(parser):
   parser.add_argument("--num_units", type=int, default=32, help="Network size.")
   parser.add_argument("--num_layers", type=int, default=2,
                       help="Network depth.")
+  parser.add_argument("--num_encoder_layers", type=int, default=None,
+                      help="Encoder depth, equal to num_layers if None.")
+  parser.add_argument("--num_decoder_layers", type=int, default=None,
+                      help="Decoder depth, equal to num_layers if None.")
   parser.add_argument("--encoder_type", type=str, default="uni", help="""\
-      uni | bi | gnmt. For bi, we build num_layers/2 bi-directional layers.For
-      gnmt, we build 1 bi-directional layer, and (num_layers - 1) uni-
-      directional layers.\
+      uni | bi | gnmt.
+      For bi, we build num_encoder_layers/2 bi-directional layers.
+      For gnmt, we build 1 bi-directional layer, and (num_encoder_layers - 1)
+        uni-directional layers.\
       """)
   parser.add_argument("--residual", type="bool", nargs="?", const=True,
                       default=False,
@@ -55,6 +60,8 @@ def add_arguments(parser):
   parser.add_argument("--time_major", type="bool", nargs="?", const=True,
                       default=True,
                       help="Whether to use time-major mode for dynamic RNN.")
+  parser.add_argument("--num_embeddings_partitions", type=int, default=0,
+                      help="Number of partitions for embedding vars.")
 
   # attention mechanisms
   parser.add_argument("--attention", type=str, default="", help="""\
@@ -74,6 +81,14 @@ def add_arguments(parser):
           attention.\
       """)
   parser.add_argument(
+      "--output_attention", type="bool", nargs="?", const=True,
+      default=True,
+      help="""\
+      Only used in standard attention_architecture. Whether use attention as
+      the cell output at each timestep.
+      .\
+      """)
+  parser.add_argument(
       "--pass_hidden_state", type="bool", nargs="?", const=True,
       default=True,
       help="""\
@@ -85,12 +100,24 @@ def add_arguments(parser):
   parser.add_argument("--optimizer", type=str, default="sgd", help="sgd | adam")
   parser.add_argument("--learning_rate", type=float, default=1.0,
                       help="Learning rate. Adam: 0.001 | 0.0001")
-  parser.add_argument("--start_decay_step", type=int, default=0,
-                      help="When we start to decay")
-  parser.add_argument("--decay_steps", type=int, default=10000,
-                      help="How frequent we decay")
-  parser.add_argument("--decay_factor", type=float, default=0.98,
-                      help="How much we decay.")
+  parser.add_argument("--warmup_steps", type=int, default=0,
+                      help="How many steps we inverse-decay learning.")
+  parser.add_argument("--warmup_scheme", type=str, default="t2t", help="""\
+      How to warmup learning rates. Options include:
+        t2t: Tensor2Tensor's way, start with lr 100 times smaller, then
+             exponentiate until the specified lr.\
+      """)
+  parser.add_argument(
+      "--decay_scheme", type=str, default="", help="""\
+      How we decay learning rate. Options include:
+        luong234: after 2/3 num train steps, we start halving the learning rate
+          for 4 times before finishing.
+        luong5: after 1/2 num train steps, we start halving the learning rate
+          for 5 times before finishing.\
+        luong10: after 1/2 num train steps, we start halving the learning rate
+          for 10 times before finishing.\
+      """)
+
   parser.add_argument(
       "--num_train_steps", type=int, default=12000, help="Num steps to train.")
   parser.add_argument("--colocate_gradients_with_ops", type="bool", nargs="?",
@@ -104,7 +131,7 @@ def add_arguments(parser):
                       help="uniform | glorot_normal | glorot_uniform")
   parser.add_argument("--init_weight", type=float, default=0.1,
                       help=("for uniform init_op, initialize weights "
-                           "between [-this, this]."))
+                            "between [-this, this]."))
 
   # data
   parser.add_argument("--src", type=str, default=None,
@@ -122,8 +149,11 @@ def add_arguments(parser):
 
   # Vocab
   parser.add_argument("--vocab_prefix", type=str, default=None, help="""\
-      Vocab prefix, expect files with src/tgt suffixes.If None, extract from
-      train files.\
+      Vocab prefix, expect files with src/tgt suffixes.\
+      """)
+  parser.add_argument("--embed_prefix", type=str, default=None, help="""\
+      Pretrained embedding prefix, expect files with src/tgt suffixes.
+      The embedding files should be Glove formated txt files.\
       """)
   parser.add_argument("--sos", type=str, default="<s>",
                       help="Start-of-sentence symbol.")
@@ -135,6 +165,11 @@ def add_arguments(parser):
       Whether to use the source vocab and embeddings for both source and
       target.\
       """)
+  parser.add_argument("--check_special_token", type="bool", default=True,
+                      help="""\
+                      Whether check special sos, eos, unk tokens exist in the
+                      vocab files.\
+                      """)
 
   # Sequence lengths
   parser.add_argument("--src_max_len", type=int, default=50,
@@ -151,15 +186,13 @@ def add_arguments(parser):
 
   # Default settings works well (rarely need to change)
   parser.add_argument("--unit_type", type=str, default="lstm",
-                      help="lstm | gru | layer_norm_lstm")
+                      help="lstm | gru | layer_norm_lstm | nas")
   parser.add_argument("--forget_bias", type=float, default=1.0,
                       help="Forget bias for BasicLSTMCell.")
   parser.add_argument("--dropout", type=float, default=0.2,
                       help="Dropout rate (not keep_prob)")
   parser.add_argument("--max_gradient_norm", type=float, default=5.0,
                       help="Clip gradients to this norm.")
-  parser.add_argument("--source_reverse", type="bool", nargs="?", const=True,
-                      default=False, help="Reverse source sequence.")
   parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
 
   parser.add_argument("--steps_per_stats", type=int, default=100,
@@ -170,9 +203,12 @@ def add_arguments(parser):
   parser.add_argument("--num_buckets", type=int, default=5,
                       help="Put data into similar-length buckets.")
 
-  # BPE
-  parser.add_argument("--bpe_delimiter", type=str, default=None,
-                      help="Set to @@ to activate BPE")
+  # SPM
+  parser.add_argument("--subword_option", type=str, default="",
+                      choices=["", "bpe", "spm"],
+                      help="""\
+                      Set to bpe or spm to activate subword desegmentation.\
+                      """)
 
   # Misc
   parser.add_argument("--num_gpus", type=int, default=1,
@@ -194,6 +230,16 @@ def add_arguments(parser):
                             "hparams values from FLAGS."))
   parser.add_argument("--random_seed", type=int, default=None,
                       help="Random seed (>0, set a specific seed).")
+  parser.add_argument("--override_loaded_hparams", type="bool", nargs="?",
+                      const=True, default=False,
+                      help="Override loaded hparams with values specified")
+  parser.add_argument("--num_keep_ckpts", type=int, default=5,
+                      help="Max number of checkpoints to keep.")
+  parser.add_argument("--avg_ckpts", type="bool", nargs="?",
+                      const=True, default=False, help=("""\
+                      Average the last N checkpoints for external evaluation.
+                      N can be controlled by setting --num_keep_ckpts.\
+                      """))
 
   # Inference
   parser.add_argument("--ckpt", type=str, default="",
@@ -218,12 +264,27 @@ def add_arguments(parser):
       """))
   parser.add_argument("--length_penalty_weight", type=float, default=0.0,
                       help="Length penalty for beam search.")
+  parser.add_argument("--sampling_temperature", type=float,
+                      default=0.0,
+                      help=("""\
+      Softmax sampling temperature for inference decoding, 0.0 means greedy
+      decoding. This option is ignored when using beam search.\
+      """))
+  parser.add_argument("--num_translations_per_input", type=int, default=1,
+                      help=("""\
+      Number of translations generated for each sentence. This is only used for
+      inference.\
+      """))
 
   # Job info
   parser.add_argument("--jobid", type=int, default=0,
                       help="Task id of the worker.")
   parser.add_argument("--num_workers", type=int, default=1,
                       help="Number of workers (inference only).")
+  parser.add_argument("--num_inter_threads", type=int, default=0,
+                      help="number of inter_op_parallelism_threads")
+  parser.add_argument("--num_intra_threads", type=int, default=0,
+                      help="number of intra_op_parallelism_threads")
 
 
 def create_hparams(flags):
@@ -236,20 +297,25 @@ def create_hparams(flags):
       dev_prefix=flags.dev_prefix,
       test_prefix=flags.test_prefix,
       vocab_prefix=flags.vocab_prefix,
+      embed_prefix=flags.embed_prefix,
       out_dir=flags.out_dir,
 
       # Networks
       num_units=flags.num_units,
-      num_layers=flags.num_layers,
+      num_layers=flags.num_layers,  # Compatible
+      num_encoder_layers=(flags.num_encoder_layers or flags.num_layers),
+      num_decoder_layers=(flags.num_decoder_layers or flags.num_layers),
       dropout=flags.dropout,
       unit_type=flags.unit_type,
       encoder_type=flags.encoder_type,
       residual=flags.residual,
       time_major=flags.time_major,
+      num_embeddings_partitions=flags.num_embeddings_partitions,
 
       # Attention mechanisms
       attention=flags.attention,
       attention_architecture=flags.attention_architecture,
+      output_attention=flags.output_attention,
       pass_hidden_state=flags.pass_hidden_state,
 
       # Train
@@ -260,9 +326,9 @@ def create_hparams(flags):
       init_weight=flags.init_weight,
       max_gradient_norm=flags.max_gradient_norm,
       learning_rate=flags.learning_rate,
-      start_decay_step=flags.start_decay_step,
-      decay_factor=flags.decay_factor,
-      decay_steps=flags.decay_steps,
+      warmup_steps=flags.warmup_steps,
+      warmup_scheme=flags.warmup_scheme,
+      decay_scheme=flags.decay_scheme,
       colocate_gradients_with_ops=flags.colocate_gradients_with_ops,
 
       # Data constraints
@@ -270,7 +336,6 @@ def create_hparams(flags):
       max_train=flags.max_train,
       src_max_len=flags.src_max_len,
       tgt_max_len=flags.tgt_max_len,
-      source_reverse=flags.source_reverse,
 
       # Inference
       src_max_len_infer=flags.src_max_len_infer,
@@ -278,11 +343,14 @@ def create_hparams(flags):
       infer_batch_size=flags.infer_batch_size,
       beam_width=flags.beam_width,
       length_penalty_weight=flags.length_penalty_weight,
+      sampling_temperature=flags.sampling_temperature,
+      num_translations_per_input=flags.num_translations_per_input,
 
       # Vocab
       sos=flags.sos if flags.sos else vocab_utils.SOS,
       eos=flags.eos if flags.eos else vocab_utils.EOS,
-      bpe_delimiter=flags.bpe_delimiter,
+      subword_option=flags.subword_option,
+      check_special_token=flags.check_special_token,
 
       # Misc
       forget_bias=flags.forget_bias,
@@ -294,19 +362,57 @@ def create_hparams(flags):
       metrics=flags.metrics.split(","),
       log_device_placement=flags.log_device_placement,
       random_seed=flags.random_seed,
+      override_loaded_hparams=flags.override_loaded_hparams,
+      num_keep_ckpts=flags.num_keep_ckpts,
+      avg_ckpts=flags.avg_ckpts,
+      num_intra_threads=flags.num_intra_threads,
+      num_inter_threads=flags.num_inter_threads,
   )
 
 
 def extend_hparams(hparams):
   """Extend training hparams."""
+  assert hparams.num_encoder_layers and hparams.num_decoder_layers
+  if hparams.num_encoder_layers != hparams.num_decoder_layers:
+    hparams.pass_hidden_state = False
+    utils.print_out("Num encoder layer %d is different from num decoder layer"
+                    " %d, so set pass_hidden_state to False" % (
+                        hparams.num_encoder_layers,
+                        hparams.num_decoder_layers))
+
   # Sanity checks
-  if hparams.encoder_type == "bi" and hparams.num_layers % 2 != 0:
-    raise ValueError("For bi, num_layers %d should be even" %
-                     hparams.num_layers)
+  if hparams.encoder_type == "bi" and hparams.num_encoder_layers % 2 != 0:
+    raise ValueError("For bi, num_encoder_layers %d should be even" %
+                     hparams.num_encoder_layers)
   if (hparams.attention_architecture in ["gnmt"] and
-      hparams.num_layers < 2):
+      hparams.num_encoder_layers < 2):
     raise ValueError("For gnmt attention architecture, "
-                     "num_layers %d should be >= 2" % hparams.num_layers)
+                     "num_encoder_layers %d should be >= 2" %
+                     hparams.num_encoder_layers)
+
+  # Set residual layers
+  num_encoder_residual_layers = 0
+  num_decoder_residual_layers = 0
+  if hparams.residual:
+    if hparams.num_encoder_layers > 1:
+      num_encoder_residual_layers = hparams.num_encoder_layers - 1
+    if hparams.num_decoder_layers > 1:
+      num_decoder_residual_layers = hparams.num_decoder_layers - 1
+
+    if hparams.encoder_type == "gnmt":
+      # The first unidirectional layer (after the bi-directional layer) in
+      # the GNMT encoder can't have residual connection due to the input is
+      # the concatenation of fw_cell and bw_cell's outputs.
+      num_encoder_residual_layers = hparams.num_encoder_layers - 2
+
+      # Compatible for GNMT models
+      if hparams.num_encoder_layers == hparams.num_decoder_layers:
+        num_decoder_residual_layers = num_encoder_residual_layers
+  hparams.add_hparam("num_encoder_residual_layers", num_encoder_residual_layers)
+  hparams.add_hparam("num_decoder_residual_layers", num_decoder_residual_layers)
+
+  if hparams.subword_option and hparams.subword_option not in ["spm", "bpe"]:
+    raise ValueError("subword option must be either spm, or bpe")
 
   # Flags
   utils.print_out("# hparams:")
@@ -316,19 +422,6 @@ def extend_hparams(hparams):
   utils.print_out("  dev_prefix=%s" % hparams.dev_prefix)
   utils.print_out("  test_prefix=%s" % hparams.test_prefix)
   utils.print_out("  out_dir=%s" % hparams.out_dir)
-
-  # Set num_residual_layers
-  if hparams.residual and hparams.num_layers > 1:
-    if hparams.encoder_type == "gnmt":
-      # The first unidirectional layer (after the bi-directional layer) in
-      # the GNMT encoder can't have residual connection due to the input is
-      # the concatenation of fw_cell and bw_cell's outputs.
-      num_residual_layers = hparams.num_layers - 2
-    else:
-      num_residual_layers = hparams.num_layers - 1
-  else:
-    num_residual_layers = 0
-  hparams.add_hparam("num_residual_layers", num_residual_layers)
 
   ## Vocab
   # Get vocab file names first
@@ -342,6 +435,7 @@ def extend_hparams(hparams):
   src_vocab_size, src_vocab_file = vocab_utils.check_vocab(
       src_vocab_file,
       hparams.out_dir,
+      check_special_token=hparams.check_special_token,
       sos=hparams.sos,
       eos=hparams.eos,
       unk=vocab_utils.UNK)
@@ -355,6 +449,7 @@ def extend_hparams(hparams):
     tgt_vocab_size, tgt_vocab_file = vocab_utils.check_vocab(
         tgt_vocab_file,
         hparams.out_dir,
+        check_special_token=hparams.check_special_token,
         sos=hparams.sos,
         eos=hparams.eos,
         unk=vocab_utils.UNK)
@@ -362,6 +457,19 @@ def extend_hparams(hparams):
   hparams.add_hparam("tgt_vocab_size", tgt_vocab_size)
   hparams.add_hparam("src_vocab_file", src_vocab_file)
   hparams.add_hparam("tgt_vocab_file", tgt_vocab_file)
+
+  # Pretrained Embeddings:
+  hparams.add_hparam("src_embed_file", "")
+  hparams.add_hparam("tgt_embed_file", "")
+  if hparams.embed_prefix:
+    src_embed_file = hparams.embed_prefix + "." + hparams.src
+    tgt_embed_file = hparams.embed_prefix + "." + hparams.tgt
+
+    if tf.gfile.Exists(src_embed_file):
+      hparams.src_embed_file = src_embed_file
+
+    if tf.gfile.Exists(tgt_embed_file):
+      hparams.tgt_embed_file = tgt_embed_file
 
   # Check out_dir
   if not tf.gfile.Exists(hparams.out_dir):
@@ -374,6 +482,12 @@ def extend_hparams(hparams):
     best_metric_dir = os.path.join(hparams.out_dir, "best_" + metric)
     hparams.add_hparam("best_" + metric + "_dir", best_metric_dir)
     tf.gfile.MakeDirs(best_metric_dir)
+
+    if hparams.avg_ckpts:
+      hparams.add_hparam("avg_best_" + metric, 0)  # larger is better
+      best_metric_dir = os.path.join(hparams.out_dir, "avg_best_" + metric)
+      hparams.add_hparam("avg_best_" + metric + "_dir", best_metric_dir)
+      tf.gfile.MakeDirs(best_metric_dir)
 
   return hparams
 
@@ -391,21 +505,19 @@ def ensure_compatible_hparams(hparams, default_hparams, hparams_path):
     if key not in config:
       hparams.add_hparam(key, default_config[key])
 
-  # Make sure that the loaded model has latest values for the below keys
-  updated_keys = [
-      "out_dir", "num_gpus", "test_prefix", "beam_width",
-      "length_penalty_weight", "num_train_steps"
-  ]
-  for key in updated_keys:
-    if key in default_config and getattr(hparams, key) != default_config[key]:
-      utils.print_out("# Updating hparams.%s: %s -> %s" %
-                      (key, str(getattr(hparams, key)),
-                       str(default_config[key])))
-      setattr(hparams, key, default_config[key])
+  # Update all hparams' keys if override_loaded_hparams=True
+  if default_hparams.override_loaded_hparams:
+    for key in default_config:
+      if getattr(hparams, key) != default_config[key]:
+        utils.print_out("# Updating hparams.%s: %s -> %s" %
+                        (key, str(getattr(hparams, key)),
+                         str(default_config[key])))
+        setattr(hparams, key, default_config[key])
   return hparams
 
 
-def create_or_load_hparams(out_dir, default_hparams, hparams_path):
+def create_or_load_hparams(
+    out_dir, default_hparams, hparams_path, save_hparams=True):
   """Create hparams or load hparams from out_dir."""
   hparams = utils.load_hparams(out_dir)
   if not hparams:
@@ -417,17 +529,17 @@ def create_or_load_hparams(out_dir, default_hparams, hparams_path):
     hparams = ensure_compatible_hparams(hparams, default_hparams, hparams_path)
 
   # Save HParams
-  utils.save_hparams(out_dir, hparams)
-
-  for metric in hparams.metrics:
-    utils.save_hparams(getattr(hparams, "best_" + metric + "_dir"), hparams)
+  if save_hparams:
+    utils.save_hparams(out_dir, hparams)
+    for metric in hparams.metrics:
+      utils.save_hparams(getattr(hparams, "best_" + metric + "_dir"), hparams)
 
   # Print HParams
   utils.print_hparams(hparams)
   return hparams
 
 
-def run_main(flags, default_hparams, train_fn, inference_fn):
+def run_main(flags, default_hparams, train_fn, inference_fn, target_session=""):
   """Run main."""
   # Job
   jobid = flags.jobid
@@ -446,7 +558,8 @@ def run_main(flags, default_hparams, train_fn, inference_fn):
   if not tf.gfile.Exists(out_dir): tf.gfile.MakeDirs(out_dir)
 
   # Load hparams.
-  hparams = create_or_load_hparams(out_dir, default_hparams, flags.hparams_path)
+  hparams = create_or_load_hparams(
+      out_dir, default_hparams, flags.hparams_path, save_hparams=(jobid == 0))
 
   if flags.inference_input_file:
     # Inference indices
@@ -471,11 +584,11 @@ def run_main(flags, default_hparams, train_fn, inference_fn):
             ref_file,
             trans_file,
             metric,
-            hparams.bpe_delimiter)
+            hparams.subword_option)
         utils.print_out("  %s: %.1f" % (metric, score))
   else:
     # Train
-    train_fn(hparams)
+    train_fn(hparams, target_session=target_session)
 
 
 def main(unused_argv):

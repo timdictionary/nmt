@@ -29,8 +29,9 @@ import tensorflow as tf
 
 
 def check_tensorflow_version():
-  if tf.__version__ < "1.2.1":
-    raise EnvironmentError("Tensorflow version must >= 1.2.1")
+  min_tf_version = "1.4.0-dev20171024"
+  if tf.__version__ < min_tf_version:
+    raise EnvironmentError("Tensorflow version must >= %s" % min_tf_version)
 
 
 def safe_exp(value):
@@ -60,14 +61,19 @@ def print_out(s, f=None, new_line=True):
       f.write(b"\n")
 
   # stdout
-  print(s.encode("utf-8"), end="", file=sys.stdout)
+  out_s = s.encode("utf-8")
+  if not isinstance(out_s, str):
+    out_s = out_s.decode("utf-8")
+  print(out_s, end="", file=sys.stdout)
+
   if new_line:
     sys.stdout.write("\n")
   sys.stdout.flush()
 
 
-def print_hparams(hparams, skip_patterns=None):
+def print_hparams(hparams, skip_patterns=None, header=None):
   """Print hparams, can skip keys based on pattern."""
+  if header: print_out("%s" % header)
   values = hparams.values()
   for key in sorted(values.keys()):
     if not skip_patterns or all(
@@ -128,13 +134,21 @@ def add_summary(summary_writer, global_step, tag, value):
   summary_writer.add_summary(summary, global_step)
 
 
-def get_config_proto(log_device_placement=False, allow_soft_placement=True):
+def get_config_proto(log_device_placement=False, allow_soft_placement=True,
+                     num_intra_threads=0, num_inter_threads=0):
   # GPU options:
   # https://www.tensorflow.org/versions/r0.10/how_tos/using_gpu/index.html
   config_proto = tf.ConfigProto(
       log_device_placement=log_device_placement,
       allow_soft_placement=allow_soft_placement)
   config_proto.gpu_options.allow_growth = True
+
+  # CPU threads options
+  if num_intra_threads:
+    config_proto.intra_op_parallelism_threads = num_intra_threads
+  if num_inter_threads:
+    config_proto.inter_op_parallelism_threads = num_inter_threads
+
   return config_proto
 
 
@@ -161,3 +175,9 @@ def format_bpe_text(symbols, delimiter=b"@@"):
       words.append(word)
       word = b""
   return b" ".join(words)
+
+
+def format_spm_text(symbols):
+  """Decode a text in SPM (https://github.com/google/sentencepiece) format."""
+  return u"".join(format_text(symbols).decode("utf-8").split()).replace(
+      u"\u2581", u" ").strip().encode("utf-8")

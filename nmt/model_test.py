@@ -27,6 +27,8 @@ from . import attention_model
 from . import gnmt_model
 from . import model
 from .utils import common_test_utils
+from .utils import nmt_utils
+
 
 float32 = np.float32
 int32 = np.int32
@@ -173,39 +175,28 @@ class ModelTest(tf.test.TestCase):
         'AttentionMechanismLuong/logits_sum': -0.026374735,
         'AttentionMechanismNormedBahdanau/logits_sum': -0.026376063,
         'AttentionMechanismScaledLuong/logits_sum': -0.026374735,
-        'GNMTModel_gnmt/logits_sum': -0.98668635,
-        'GNMTModel_gnmt_v2/logits_sum': -0.98513138,
+        'GNMTModel_gnmt/logits_sum': -1.10848486,
+        'GNMTModel_gnmt_v2/logits_sum': -1.10950875,
         'NoAttentionNoResidualUniEncoder/logits_sum': -1.0808625,
         'NoAttentionResidualBiEncoder/logits_sum': -2.8147559,
         'UniEncoderBottomAttentionArchitecture/logits_sum': -0.97026241,
         'UniEncoderStandardAttentionArchitecture/logits_sum': -0.02665353
     }
 
-    cls.actual_infer_words = {}
-    cls.expected_infer_words = {
-        'BeamSearchAttentionModel':
-            array(
-                [[['eos', 'eos', 'sos'], ['eos', 'eos', 'b']],
-                 [['eos', 'UNK', 'a'], ['eos', 'UNK', 'sos']],
-                 [['UNK', 'UNK', 'eos'], ['UNK', 'UNK',
-                                          'a']], [['UNK', 'UNK', 'UNK'],
-                                                  ['UNK', 'UNK', 'sos']]],
-                dtype=np.bytes_),
-        'BeamSearchBasicModel':
-            array(
-                [[['b', 'b', 'b'], ['b', 'a', 'b']], [['b', 'b', 'b'],
-                                                      ['b', 'b', 'b']],
-                 [['b', 'b', 'b'], ['b', 'b', 'b']], [['b', 'sos', 'c'],
-                                                      ['b', 'b', 'sos']]],
-                dtype=np.bytes_),
-        'BeamSearchGNMTModel':
-            array(
-                [[['eos', 'b', 'b'], ['eos', 'b', 'b']],
-                 [['UNK', 'eos', 'sos'], ['UNK', 'eos', 'sos']],
-                 [['UNK', 'UNK', 'sos'], ['UNK', 'UNK',
-                                          'sos']], [['UNK', 'UNK', 'sos'],
-                                                    ['UNK', 'UNK', 'sos']]],
-                dtype=np.bytes_)
+    cls.actual_beam_sentences = {}
+    cls.expected_beam_sentences = {
+        'BeamSearchAttentionModel: batch 0 of beam 0': '',
+        'BeamSearchAttentionModel: batch 0 of beam 1': 'sos a sos a',
+        'BeamSearchAttentionModel: batch 1 of beam 0': '',
+        'BeamSearchAttentionModel: batch 1 of beam 1': 'b',
+        'BeamSearchBasicModel: batch 0 of beam 0': 'b b b b',
+        'BeamSearchBasicModel: batch 0 of beam 1': 'b b b sos',
+        'BeamSearchBasicModel: batch 0 of beam 2': 'b b b c',
+        'BeamSearchBasicModel: batch 1 of beam 0': 'b b b b',
+        'BeamSearchBasicModel: batch 1 of beam 1': 'a b b b',
+        'BeamSearchBasicModel: batch 1 of beam 2': 'b b b sos',
+        'BeamSearchGNMTModel: batch 0 of beam 0': '',
+        'BeamSearchGNMTModel: batch 1 of beam 0': '',
     }
 
   @classmethod
@@ -226,8 +217,8 @@ class ModelTest(tf.test.TestCase):
     pprint.pprint(cls.actual_infer_values)
     sys.stdout.flush()
 
-    print('ModelTest - actual_infer_words: ')
-    pprint.pprint(cls.actual_infer_words)
+    print('ModelTest - actual_beam_sentences: ')
+    pprint.pprint(cls.actual_beam_sentences)
     sys.stdout.flush()
 
   def assertAllClose(self, *args, **kwargs):
@@ -259,7 +250,7 @@ class ModelTest(tf.test.TestCase):
 
   def _assertTrainStepsLoss(self, m, sess, name, num_steps=1):
     for _ in range(num_steps):
-      _, loss, _, _, _, _, _ = m.train(sess)
+      _, loss, _, _, _, _, _, _, _ = m.train(sess)
 
     print('{} {}-th step loss is: '.format(name, num_steps), loss)
     expected_loss = self.expected_train_values[name + '/loss']
@@ -290,19 +281,23 @@ class ModelTest(tf.test.TestCase):
 
     self.assertAllClose(expected_logits_sum, logits_sum)
 
-  def _assertInferWords(self, m, sess, name):
-    results = m.infer(sess)
-    words = results[3]
+  def _assertBeamSearchOutputs(self, m, sess, assert_top_k_sentence, name):
+    nmt_outputs, _ = m.decode(sess)
 
-    expected_words = self.expected_infer_words[name]
-    self.actual_infer_words[name] = words
-
-    self.assertAllEqual(expected_words, words)
+    for i in range(assert_top_k_sentence):
+      output_words = nmt_outputs[i]
+      for j in range(output_words.shape[0]):
+        sentence = nmt_utils.get_translation(
+            output_words, j, tgt_eos='eos', subword_option='')
+        sentence_key = ('%s: batch %d of beam %d' % (name, j, i))
+        self.actual_beam_sentences[sentence_key] = sentence
+        expected_sentence = self.expected_beam_sentences[sentence_key]
+        self.assertEqual(expected_sentence, sentence)
 
   def _createTestTrainModel(self, m_creator, hparams, sess):
     train_mode = tf.contrib.learn.ModeKeys.TRAIN
-    train_iterator, src_vocab_table, tgt_vocab_table = common_test_utils.create_test_iterator(
-        hparams, train_mode)
+    train_iterator, src_vocab_table, tgt_vocab_table = (
+        common_test_utils.create_test_iterator(hparams, train_mode))
     train_m = m_creator(
         hparams,
         train_mode,
@@ -317,8 +312,8 @@ class ModelTest(tf.test.TestCase):
 
   def _createTestEvalModel(self, m_creator, hparams, sess):
     eval_mode = tf.contrib.learn.ModeKeys.EVAL
-    eval_iterator, src_vocab_table, tgt_vocab_table = common_test_utils.create_test_iterator(
-        hparams, eval_mode)
+    eval_iterator, src_vocab_table, tgt_vocab_table = (
+        common_test_utils.create_test_iterator(hparams, eval_mode))
     eval_m = m_creator(
         hparams,
         eval_mode,
@@ -333,8 +328,9 @@ class ModelTest(tf.test.TestCase):
   def _createTestInferModel(
       self, m_creator, hparams, sess, init_global_vars=False):
     infer_mode = tf.contrib.learn.ModeKeys.INFER
-    infer_iterator, src_vocab_table, tgt_vocab_table, reverse_tgt_vocab_table = (
-        common_test_utils.create_test_iterator(hparams, infer_mode))
+    (infer_iterator, src_vocab_table,
+     tgt_vocab_table, reverse_tgt_vocab_table) = (
+         common_test_utils.create_test_iterator(hparams, infer_mode))
     infer_m = m_creator(
         hparams,
         infer_mode,
@@ -944,11 +940,13 @@ class ModelTest(tf.test.TestCase):
         use_residual=False,)
     hparams.beam_width = 3
     hparams.tgt_max_len_infer = 4
+    assert_top_k_sentence = 3
 
     with self.test_session() as sess:
       infer_m = self._createTestInferModel(
           model.Model, hparams, sess, True)
-      self._assertInferWords(infer_m, sess, 'BeamSearchBasicModel')
+      self._assertBeamSearchOutputs(
+          infer_m, sess, assert_top_k_sentence, 'BeamSearchBasicModel')
 
   def testBeamSearchAttentionModel(self):
     hparams = common_test_utils.create_test_hparams(
@@ -959,11 +957,13 @@ class ModelTest(tf.test.TestCase):
         use_residual=False,)
     hparams.beam_width = 3
     hparams.tgt_max_len_infer = 4
+    assert_top_k_sentence = 2
 
     with self.test_session() as sess:
       infer_m = self._createTestInferModel(
           attention_model.AttentionModel, hparams, sess, True)
-      self._assertInferWords(infer_m, sess, 'BeamSearchAttentionModel')
+      self._assertBeamSearchOutputs(
+          infer_m, sess, assert_top_k_sentence, 'BeamSearchAttentionModel')
 
   def testBeamSearchGNMTModel(self):
     hparams = common_test_utils.create_test_hparams(
@@ -973,11 +973,13 @@ class ModelTest(tf.test.TestCase):
         attention_architecture='gnmt')
     hparams.beam_width = 3
     hparams.tgt_max_len_infer = 4
+    assert_top_k_sentence = 1
 
     with self.test_session() as sess:
       infer_m = self._createTestInferModel(
           gnmt_model.GNMTModel, hparams, sess, True)
-      self._assertInferWords(infer_m, sess, 'BeamSearchGNMTModel')
+      self._assertBeamSearchOutputs(
+          infer_m, sess, assert_top_k_sentence, 'BeamSearchGNMTModel')
 
   def testInitializerGlorotNormal(self):
     hparams = common_test_utils.create_test_hparams(

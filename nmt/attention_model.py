@@ -43,7 +43,13 @@ class AttentionModel(model.Model):
                target_vocab_table,
                reverse_target_vocab_table=None,
                scope=None,
-               single_cell_fn=None):
+               extra_args=None):
+    # Set attention_mechanism_fn
+    if extra_args and extra_args.attention_mechanism_fn:
+      self.attention_mechanism_fn = extra_args.attention_mechanism_fn
+    else:
+      self.attention_mechanism_fn = create_attention_mechanism
+
     super(AttentionModel, self).__init__(
         hparams=hparams,
         mode=mode,
@@ -52,7 +58,8 @@ class AttentionModel(model.Model):
         target_vocab_table=target_vocab_table,
         reverse_target_vocab_table=reverse_target_vocab_table,
         scope=scope,
-        single_cell_fn=single_cell_fn)
+        extra_args=extra_args)
+
     if self.mode == tf.contrib.learn.ModeKeys.INFER:
       self.infer_summary = self._get_infer_summary(hparams)
 
@@ -67,13 +74,13 @@ class AttentionModel(model.Model):
           "Unknown attention architecture %s" % attention_architecture)
 
     num_units = hparams.num_units
-    num_layers = hparams.num_layers
-    num_residual_layers = hparams.num_residual_layers
-    num_gpus = hparams.num_gpus
+    num_layers = self.num_decoder_layers
+    num_residual_layers = self.num_decoder_residual_layers
     beam_width = hparams.beam_width
 
     dtype = tf.float32
 
+    # Ensure memory is batch-major
     if self.time_major:
       memory = tf.transpose(encoder_outputs, [1, 0, 2])
     else:
@@ -90,8 +97,8 @@ class AttentionModel(model.Model):
     else:
       batch_size = self.batch_size
 
-    attention_mechanism = create_attention_mechanism(
-        attention_option, num_units, memory, source_sequence_length)
+    attention_mechanism = self.attention_mechanism_fn(
+        attention_option, num_units, memory, source_sequence_length, self.mode)
 
     cell = model_helper.create_rnn_cell(
         unit_type=hparams.unit_type,
@@ -100,7 +107,7 @@ class AttentionModel(model.Model):
         num_residual_layers=num_residual_layers,
         forget_bias=hparams.forget_bias,
         dropout=hparams.dropout,
-        num_gpus=num_gpus,
+        num_gpus=self.num_gpus,
         mode=self.mode,
         single_cell_fn=self.single_cell_fn)
 
@@ -112,12 +119,13 @@ class AttentionModel(model.Model):
         attention_mechanism,
         attention_layer_size=num_units,
         alignment_history=alignment_history,
+        output_attention=hparams.output_attention,
         name="attention")
 
     # TODO(thangluong): do we need num_layers, num_gpus?
     cell = tf.contrib.rnn.DeviceWrapper(cell,
                                         model_helper.get_device_str(
-                                            num_layers - 1, num_gpus))
+                                            num_layers - 1, self.num_gpus))
 
     if hparams.pass_hidden_state:
       decoder_initial_state = cell.zero_state(batch_size, dtype).clone(
@@ -134,8 +142,10 @@ class AttentionModel(model.Model):
 
 
 def create_attention_mechanism(attention_option, num_units, memory,
-                               source_sequence_length):
+                               source_sequence_length, mode):
   """Create attention mechanism based on the attention_option."""
+  del mode  # unused
+
   # Mechanism
   if attention_option == "luong":
     attention_mechanism = tf.contrib.seq2seq.LuongAttention(

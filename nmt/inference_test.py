@@ -47,7 +47,7 @@ class InferenceTest(tf.test.TestCase):
     else:
       raise ValueError("Unknown model architecture")
 
-    infer_model = inference.create_infer_model(model_creator, hparams)
+    infer_model = model_helper.create_infer_model(model_creator, hparams)
     with self.test_session(graph=infer_model.graph) as sess:
       loaded_model, global_step = model_helper.create_or_load_model(
           infer_model.model, out_dir, sess, "infer_name")
@@ -64,18 +64,42 @@ class InferenceTest(tf.test.TestCase):
         attention_architecture="",
         use_residual=False,)
     vocab_prefix = "nmt/testdata/test_infer_vocab"
-    hparams.add_hparam("src_vocab_file", vocab_prefix + "." + hparams.src)
-    hparams.add_hparam("tgt_vocab_file", vocab_prefix + "." + hparams.tgt)
+    hparams.src_vocab_file = vocab_prefix + "." + hparams.src
+    hparams.tgt_vocab_file = vocab_prefix + "." + hparams.tgt
 
     infer_file = "nmt/testdata/test_infer_file"
     out_dir = os.path.join(tf.test.get_temp_dir(), "basic_infer")
-    hparams.add_hparam("out_dir", out_dir)
+    hparams.out_dir = out_dir
     os.makedirs(out_dir)
     output_infer = os.path.join(out_dir, "output_infer")
     ckpt = self._createTestInferCheckpoint(hparams, out_dir)
     inference.inference(ckpt, infer_file, output_infer, hparams)
     with open(output_infer) as f:
       self.assertEqual(5, len(list(f)))
+
+  def testBasicModelWithMultipleTranslations(self):
+    hparams = common_test_utils.create_test_hparams(
+        encoder_type="uni",
+        num_layers=1,
+        attention="",
+        attention_architecture="",
+        use_residual=False,
+        num_translations_per_input=2,
+        beam_width=2,
+    )
+    vocab_prefix = "nmt/testdata/test_infer_vocab"
+    hparams.src_vocab_file = vocab_prefix + "." + hparams.src
+    hparams.tgt_vocab_file = vocab_prefix + "." + hparams.tgt
+
+    infer_file = "nmt/testdata/test_infer_file"
+    out_dir = os.path.join(tf.test.get_temp_dir(), "multi_basic_infer")
+    hparams.out_dir = out_dir
+    os.makedirs(out_dir)
+    output_infer = os.path.join(out_dir, "output_infer")
+    ckpt = self._createTestInferCheckpoint(hparams, out_dir)
+    inference.inference(ckpt, infer_file, output_infer, hparams)
+    with open(output_infer) as f:
+      self.assertEqual(10, len(list(f)))
 
   def testAttentionModel(self):
     hparams = common_test_utils.create_test_hparams(
@@ -85,12 +109,12 @@ class InferenceTest(tf.test.TestCase):
         attention_architecture="standard",
         use_residual=False,)
     vocab_prefix = "nmt/testdata/test_infer_vocab"
-    hparams.add_hparam("src_vocab_file", vocab_prefix + "." + hparams.src)
-    hparams.add_hparam("tgt_vocab_file", vocab_prefix + "." + hparams.tgt)
+    hparams.src_vocab_file = vocab_prefix + "." + hparams.src
+    hparams.tgt_vocab_file = vocab_prefix + "." + hparams.tgt
 
     infer_file = "nmt/testdata/test_infer_file"
     out_dir = os.path.join(tf.test.get_temp_dir(), "attention_infer")
-    hparams.add_hparam("out_dir", out_dir)
+    hparams.out_dir = out_dir
     os.makedirs(out_dir)
     output_infer = os.path.join(out_dir, "output_infer")
     ckpt = self._createTestInferCheckpoint(hparams, out_dir)
@@ -106,12 +130,12 @@ class InferenceTest(tf.test.TestCase):
         attention_architecture="standard",
         use_residual=False,)
     vocab_prefix = "nmt/testdata/test_infer_vocab"
-    hparams.add_hparam("src_vocab_file", vocab_prefix + "." + hparams.src)
-    hparams.add_hparam("tgt_vocab_file", vocab_prefix + "." + hparams.tgt)
+    hparams.src_vocab_file = vocab_prefix + "." + hparams.src
+    hparams.tgt_vocab_file = vocab_prefix + "." + hparams.tgt
 
     infer_file = "nmt/testdata/test_infer_file"
     out_dir = os.path.join(tf.test.get_temp_dir(), "multi_worker_infer")
-    hparams.add_hparam("out_dir", out_dir)
+    hparams.out_dir = out_dir
     os.makedirs(out_dir)
     output_infer = os.path.join(out_dir, "output_infer")
 
@@ -146,12 +170,12 @@ class InferenceTest(tf.test.TestCase):
         use_residual=False,
         inference_indices=[0])
     vocab_prefix = "nmt/testdata/test_infer_vocab"
-    hparams.add_hparam("src_vocab_file", vocab_prefix + "." + hparams.src)
-    hparams.add_hparam("tgt_vocab_file", vocab_prefix + "." + hparams.tgt)
+    hparams.src_vocab_file = vocab_prefix + "." + hparams.src
+    hparams.tgt_vocab_file = vocab_prefix + "." + hparams.tgt
 
     infer_file = "nmt/testdata/test_infer_file"
     out_dir = os.path.join(tf.test.get_temp_dir(), "basic_infer_with_indices")
-    hparams.add_hparam("out_dir", out_dir)
+    hparams.out_dir = out_dir
     os.makedirs(out_dir)
     output_infer = os.path.join(out_dir, "output_infer")
     ckpt = self._createTestInferCheckpoint(hparams, out_dir)
@@ -170,13 +194,13 @@ class InferenceTest(tf.test.TestCase):
     # TODO(rzhao): Make infer indices support batch_size > 1.
     hparams.infer_batch_size = 1
     vocab_prefix = "nmt/testdata/test_infer_vocab"
-    hparams.add_hparam("src_vocab_file", vocab_prefix + "." + hparams.src)
-    hparams.add_hparam("tgt_vocab_file", vocab_prefix + "." + hparams.tgt)
+    hparams.src_vocab_file = vocab_prefix + "." + hparams.src
+    hparams.tgt_vocab_file = vocab_prefix + "." + hparams.tgt
 
     infer_file = "nmt/testdata/test_infer_file"
     out_dir = os.path.join(tf.test.get_temp_dir(),
                            "attention_infer_with_indices")
-    hparams.add_hparam("out_dir", out_dir)
+    hparams.out_dir = out_dir
     os.makedirs(out_dir)
     output_infer = os.path.join(out_dir, "output_infer")
     ckpt = self._createTestInferCheckpoint(hparams, out_dir)
